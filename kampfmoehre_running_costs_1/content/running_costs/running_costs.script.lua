@@ -12,7 +12,7 @@
 -- update() is dispatched to one of the sim pool threads, each with its own
 -- Lua state: nothing persistent lives in locals, everything goes through the
 -- game-script state (saved with the game). State layout:
---   { version, tSample, tStart, tPerfLog,
+--   { version, tSample, tPerfLog, fails,
 --     v = { [vehicle] = History },
 --     summary = { [vehicle] = Summary + { line, rc, static, key } },
 --     stat = { [vehicle] = { r = static rate per year, t = last check } },
@@ -24,8 +24,9 @@
 -- A version mismatch rebuilds the state from scratch.
 
 function data()
-	local VERSION = "0.1.0"
+	local VERSION = "0.1.1"
 	local STATE_VERSION = 2       -- 2: histories carry `first` (coverage from the first sample)
+	local MAX_FAILS = 10          -- consecutive failed steps before the state is rebuilt
 	local SAMPLE_MS = 3000       -- game time between samples (8.5 ms per sample at 364 vehicles: state get 2.8, classify 2.8, set 2.9)
 	local PERF_LOG_MS = 300000   -- game time between perf log lines
 	local LOG_PREFIX = "[kampfmoehre_running_costs] "
@@ -44,20 +45,6 @@ function data()
 
 	local errorCount = 0
 	local STATE_NAMES = { "IN_DEPOT", "EN_ROUTE", "AT_TERMINAL", "GOING_TO_DEPOT" }
-	local stateNameOf = nil   -- enum value -> name, built once per Lua state
-
-	local function stateName(value)
-		if stateNameOf == nil then
-			stateNameOf = {}
-			local enum = api.type["enum"] and api.type["enum"].TransportVehicleState
-			if enum then
-				for __, name in ipairs(STATE_NAMES) do
-					if enum[name] ~= nil then stateNameOf[enum[name]] = name end
-				end
-			end
-		end
-		return stateNameOf[value] or tostring(value)
-	end
 
 	-- static running cost per year of a consist: sum of the parts' metadata
 	-- runningCosts (the rate of a healthy vehicle); cached per model id
@@ -171,7 +158,7 @@ function data()
 		local tGet = clock:getTime() / 1000
 		if type(s) ~= "table" or s.version ~= STATE_VERSION or type(s.tSample) ~= "number" or s.tSample > now
 			or type(s.v) ~= "table" or type(s.summary) ~= "table" then
-			s = { version = STATE_VERSION, tSample = now, tStart = now, tPerfLog = now,
+			s = { version = STATE_VERSION, tSample = now, tPerfLog = now, fails = 0,
 				v = {}, summary = {}, perf = { lastMs = 0, maxMs = 0 } }
 			state:set(s)
 			log("v" .. VERSION .. " sampler started (fresh state) at gameTime=" .. now)
@@ -183,6 +170,7 @@ function data()
 		s.tSample = now
 		local count = sample(s, now, dtMs)
 		if count == nil then return end   -- vehicle lists unavailable this tick: nothing written
+		s.fails = 0
 		local tSample = clock:getTime() / 1000
 		state:set(s)
 		local ms = clock:getTime() / 1000
@@ -192,9 +180,25 @@ function data()
 		if now - (s.tPerfLog or 0) >= PERF_LOG_MS then
 			s.tPerfLog = now
 			state:set(s)
-			log(string.format("perf: last sample %.2f ms (state get %.2f, classify %.2f, state set %.2f), max %.2f ms, %d vehicles",
+			log(string.format("perf: last sample %.2f ms (state get %.2f, classify %.2f, state set %.2f), max of logged samples %.2f ms, %d vehicles",
 				ms, tGet, tSample - tGet, ms - tSample, s.perf.maxMs, count))
 		end
+	end
+
+	-- a step that keeps failing on a state of the current version (e.g. a
+	-- damaged save) is given up after MAX_FAILS: the state is rebuilt
+	local function noteFailure(state)
+		pcall(function()
+			local s = state:get()
+			if type(s) ~= "table" then return end
+			s.fails = (s.fails or 0) + 1
+			if s.fails >= MAX_FAILS then
+				log("resetting the state after " .. s.fails .. " failed steps in a row")
+				state:set({ version = -1 })
+			else
+				state:set(s)
+			end
+		end)
 	end
 
 	local function update(userParams, state, dt)
@@ -203,6 +207,7 @@ function data()
 		if not ok then
 			errorCount = errorCount + 1
 			if errorCount <= 10 then log("error: " .. tostring(err)) end
+			noteFailure(state)
 		end
 	end
 

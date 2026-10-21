@@ -21,7 +21,8 @@
         "running_costs_short_driving": "driving",
         "running_costs_short_waiting": "waiting",
         "running_costs_short_terminal": "terminal {factor} %",
-        "running_costs_short_depot": "depot {factor} %"
+        "running_costs_short_depot": "depot {factor} %",
+        "running_costs_less_data_one": "1 vehicle with less data"
     },
     "de": {
         "running_costs_now": "Jetzt {rate}/min",
@@ -45,6 +46,7 @@
         "running_costs_short_driving": "Fahrt",
         "running_costs_short_waiting": "Warten",
         "running_costs_short_terminal": "Terminal {factor} %",
-        "running_costs_short_depot": "Depot {factor} %"
+        "running_costs_short_depot": "Depot {factor} %",
+        "running_costs_less_data_one": "1 Fahrzeug mit weniger Daten"
     }
 }

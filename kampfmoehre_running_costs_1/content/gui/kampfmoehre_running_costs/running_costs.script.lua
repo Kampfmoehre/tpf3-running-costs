@@ -18,7 +18,7 @@
 -- live values), both unit-tested with luajit.
 
 function data()
-	local VERSION = "0.1.0"
+	local VERSION = "0.1.1"
 	local SAMPLE_S = 2     -- seconds between reads of the sampler state / table refreshes
 	local LOG_PREFIX = "[kampfmoehre_running_costs] "
 	local GS_NAME = "kampfmoehre_running_costs_1::/running_costs/running_costs.gs"
@@ -167,10 +167,10 @@ function data()
 		return all
 	end
 
-	-- Summary of one vehicle or nil
-	local function summaryOf(v)
+	-- Summary of one vehicle or nil; gs = the GAME_SCRIPT component (fetched
+	-- once per table refresh by the caller, may be nil)
+	local function summaryOf(gs, v)
 		if nativeWorks ~= false then
-			local gs = gsComponent()
 			if gs then
 				local w = nativeSummary(gs, v)
 				if type(w) == "table" then
@@ -211,14 +211,15 @@ function data()
 	local function tableData(p)
 		local vehicles = p.line and lineVehicles(p.line) or (p.vehicles or {})
 		local list, names = {}, {}
+		local gs = gsComponent()
 		for __, v in ipairs(vehicles) do
-			local w = summaryOf(v)
+			local w = summaryOf(gs, v)
 			if w then
 				list[#list + 1] = w
 				names[#names + 1] = { v = v, cov = w.cov or 0 }
 			end
 		end
-		local T = cost_rows.build(list, classes, yearMs())
+		local T = cost_rows.build(list, classes)
 		T.booked = nil
 		T.lessTooltip = nil
 		if not T.empty then
@@ -260,7 +261,7 @@ function data()
 	end
 
 	local CostTable = react.RegisterRecipe("KampfmoehreRunningCostsTable", function(p)
-		local state = react.useState(tableData(p))
+		local state = react.useStateLazy(function() return tableData(p) end)
 		react.onStepTimer(function()
 			local now = tableData(p)
 			if now.sig ~= state:old().sig then state:set(now) end
@@ -281,7 +282,7 @@ function data()
 		if T.lessData > 0 then
 			children[#children + 1] = builtin.Component{
 				meta = { tooltip = T.lessTooltip or "" },
-				layout = builtin.BoxLayout{ children = { cell(fmt("running_costs_less_data", { n = tostring(T.lessData) }), "font-scale-annotation") } },
+				layout = builtin.BoxLayout{ children = { cell(fmt(cost_rows.lessDataKey(T.lessData), { n = tostring(T.lessData) }), "font-scale-annotation") } },
 			}
 		end
 		local rows = { builtin.Row{ cells = {
@@ -365,7 +366,7 @@ function data()
 		{ id = "::VehicleEowExtensionPoint" }, "KampfmoehreRunningCostsVehicle",
 		function(params)
 			-- false instead of nil: a react state must hold a value
-			local state = react.useState(liveData(params.entityId) or false)
+			local state = react.useStateLazy(function() return liveData(params.entityId) or false end)
 			react.onStepTimer(function()
 				local now = liveData(params.entityId) or false
 				if not sameLive(now, state:old()) then state:set(now) end

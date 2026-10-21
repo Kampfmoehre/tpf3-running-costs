@@ -85,6 +85,17 @@ local h5 = M.new(500000); M.add(h5, 500500, 500, "terminal", Y, 0, 0.4, Y)
 M.add(h5, 100, 100, "driving", Y, 0, 1.0, Y)
 check("reset on backwards time", W(h5, 100, Y).t.terminal == nil and W(h5, 100, Y).t.driving == 0.1)
 
+-- pro rata with a history that starts mid-bucket: the oldest bucket's data
+-- spans [first, bucket end], and the window cut is measured against that span
+local h9 = M.new(M.BUCKET_MS / 2)                               -- first sample at half of bucket 0
+M.add(h9, M.BUCKET_MS / 2 + 1000, 1000, "driving", Y, 0, 1.0, Y) -- 1 s -> 1000
+M.add(h9, M.BUCKET_MS + 10, 10, "driving", 0, 0, 1.0, Y)       -- bucket 1 exists, no cost
+local w9 = W(h9, M.BUCKET_MS + 10, M.BUCKET_MS / 4 + 10)        -- window starts at 3/4 of bucket 0
+near("first mid-bucket: half of the data span is inside the window", w9.c.driving, 500, 1e-6)
+near("first mid-bucket: coverage from the window start", w9.cov, M.BUCKET_MS / 4 + 10, 1e-9)
+local w9b = W(h9, M.BUCKET_MS + 10, M.BUCKET_MS + 10)           -- window starts at 0, before first
+near("window before first: full weight", w9b.c.driving, 1000, 1e-6)
+
 -- coverage starts at the first sample, not at the start of its bucket
 local h8 = M.new(100000)                                   -- bucket 0 starts at 0
 M.add(h8, 100000, 1000, "driving", Y, 0, 1.0, Y)

@@ -11,16 +11,16 @@
 local M = {}
 
 M.YEAR_S = 1461              -- default game year in seconds of game time
-M.COVERAGE_TOLERANCE_MS = 2000
+M.COVERAGE_TOLERANCE_MS = 6000   -- two sampler intervals: vehicles are read one by one
 
 local function round(x)
 	return math.floor(x + 0.5)
 end
 
--- summaries: {Summary}, classes: the cost_classes module, windowMs: the window ->
+-- summaries: {Summary}, classes: the cost_classes module ->
 -- { rows = { { key, labelKey, factor, colour, seconds, share, amount } },
 --   surcharge = { amount, pct } | nil, sum, coverageMs, lessData, empty }
-function M.build(summaries, classes, windowMs)
+function M.build(summaries, classes)
 	local out = { rows = {}, surcharge = nil, sum = 0, coverageMs = 0, lessData = 0, empty = true }
 	if type(summaries) ~= "table" then return out end
 	local t, c, s = {}, {}, 0
@@ -84,6 +84,13 @@ function M.live(rcPerYear, staticPerYear, key, classes)
 		surchargePct = pct,
 		colour = cl and cl.colour or "default",
 	}
+end
+
+-- strings.json key for the "n vehicles with less data" note: the game has no
+-- plural helper, so singular and plural are two keys
+function M.lessDataKey(n)
+	if n == 1 then return "running_costs_less_data_one" end
+	return "running_costs_less_data"
 end
 
 -- coverage in ms -> whole minutes of game time for the header; at least 1

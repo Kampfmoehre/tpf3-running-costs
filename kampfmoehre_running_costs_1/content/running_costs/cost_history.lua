@@ -77,9 +77,15 @@ function M.window(h, nowMs, windowMs, factorOf, yearMs)
 	for __, b in pairs(h.b) do
 		if type(b) == "table" and b.t0 and b.t0 + M.BUCKET_MS > from and b.t0 <= nowMs then
 			if oldest == nil or b.t0 < oldest then oldest = b.t0 end
-			-- share of the bucket inside the window (only the oldest one is cut)
+			-- share of the bucket's data inside the window (only the oldest one is
+			-- cut); the data of the history's first bucket starts at `first`
 			local weight = 1
-			if b.t0 < from then weight = (b.t0 + M.BUCKET_MS - from) / M.BUCKET_MS end
+			local dataStart = b.t0
+			if h.first and h.first > dataStart then dataStart = h.first end
+			if from > dataStart then
+				local span = b.t0 + M.BUCKET_MS - dataStart
+				weight = span > 0 and math.max(0, (b.t0 + M.BUCKET_MS - from) / span) or 0
+			end
 			local perSecond = (b.r or 0) / yearMs * 1000
 			for k, v in pairs(b.t or {}) do
 				local sec = v * weight
