@@ -40,7 +40,7 @@ says "last 24 min of game time" rather than "last year". The history is
 recorded by the mod every 3 s of game time and saved with the game, so it
 starts when the mod is first active in a save and survives reloads.
 
-Available on mod.io: (link follows after the first upload)
+Available on mod.io: <https://mod.io/g/transportfever3/m/running-cost-breakdown>
 
 ## Installation
 
