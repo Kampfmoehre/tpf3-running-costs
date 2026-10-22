@@ -67,6 +67,33 @@ check("live waiting is warn", M.live(1000, 1000, "waiting", C).colour == "warn")
 check("less-data key: singular for 1, plural otherwise", M.lessDataKey(1) == "running_costs_less_data_one" and M.lessDataKey(2) == "running_costs_less_data" and M.lessDataKey(0) == "running_costs_less_data")
 check("minutes rounds, at least 1 once there is data", M.minutes(1461000) == 24 and M.minutes(90000) == 2 and M.minutes(29000) == 1 and M.minutes(0) == 0 and M.minutes(nil) == 0)
 
+-- income rows (0.2.0)
+local e1 = { [7] = { n = 2, base = 800, ok = 1, q = 2 }, [9] = { n = 1, base = 100, ok = 0, q = 0 } }
+local e2 = { [7] = { n = 1, base = 200, ok = 1, q = 1 } }
+local Em = M.mergeIncome({ e1, e2 })
+check("merge sums per key", Em[7].n == 3 and Em[7].base == 1000 and Em[7].ok == 2 and Em[7].q == 3 and Em[9].n == 1)
+near("scale factor", M.scaleFactor(Em, 550), 0.5, 1e-9)
+check("no factor without bookings", M.scaleFactor(Em, nil) == nil and M.scaleFactor(Em, 0) == nil and M.scaleFactor(Em, -5) == nil)
+check("no factor without base", M.scaleFactor({ [7] = { n = 1, base = 0, ok = 0, q = 0 } }, 100) == nil)
+local names = { [7] = "Grain" }
+local T = M.buildIncome(Em, 0.5, function(k) return names[k] end)
+check("rows sorted by income, named, unknown key as id", #T.rows == 2 and T.rows[1].key == 7 and T.rows[1].name == "Grain" and T.rows[2].name == "9")
+near("scaled income", T.rows[1].income, 500, 1e-9); near("per item", T.rows[1].perItem, 500 / 3, 1e-9)
+near("on-time share", T.rows[1].onTimeShare, 2 / 3, 1e-9)
+check("passengers: no on-time share", T.rows[2].onTimeShare == nil)
+check("sum", T.sum.n == 4 and math.abs(T.sum.income - 550) < 1e-9 and T.scaled == true and T.empty == false)
+local R = M.buildIncome(Em, nil, function() return nil end)
+check("raw mode", R.scaled == false and math.abs(R.rows[1].income - 1000) < 1e-9)
+check("zero base: no per item, no crash", M.buildIncome({ [7] = { n = 2, base = 0, ok = 0, q = 0 } }, nil, function() end).rows[1].perItem == nil)
+check("fractional items below 0.5 are dropped", M.buildIncome({ [7] = { n = 0.4, base = 10, ok = 0, q = 0 } }, nil, function() end).empty == true)
+check("empty entries", M.buildIncome({}, nil, function() end).empty == true and M.buildIncome(nil, nil, function() end).empty == true)
+check("empty but account readable counts as scaled", M.buildIncome({}, nil, function() end, true).scaled == true and M.buildIncome({}, nil, function() end, false).scaled == false)
+local costT = { sum = 300, empty = false }
+near("result = income - costs when scaled", M.result(T, costT), 250, 1e-9)
+check("no result in raw mode", M.result(R, costT) == nil)
+near("no income but costs: result is minus the costs", M.result({ rows = {}, sum = { n = 0, base = 0, income = 0 }, scaled = true, empty = true }, costT), -300, 1e-9)
+check("nothing at all: no result", M.result({ rows = {}, sum = { n = 0, base = 0, income = 0 }, scaled = false, empty = true }, { sum = 0, empty = true }) == nil)
+
 if failures > 0 then
 	print(failures .. " failure(s)")
 	os.exit(1)

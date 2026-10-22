@@ -18,7 +18,7 @@
 -- live values), both unit-tested with luajit.
 
 function data()
-	local VERSION = "0.1.1"
+	local VERSION = "0.2.0"
 	local SAMPLE_S = 2     -- seconds between reads of the sampler state / table refreshes
 	local LOG_PREFIX = "[kampfmoehre_running_costs] "
 	local GS_NAME = "kampfmoehre_running_costs_1::/running_costs/running_costs.gs"
@@ -32,6 +32,7 @@ function data()
 	local lang_util = ug_require "::/scripts/lang_util.tl"
 	local classes = ug_require "kampfmoehre_running_costs_1::/running_costs/cost_classes.lua"
 	local cost_rows = ug_require "kampfmoehre_running_costs_1::/gui/kampfmoehre_running_costs/cost_rows.lua"
+	local cost_history = ug_require "kampfmoehre_running_costs_1::/running_costs/cost_history.lua"
 
 	local function round(x) return math.floor(x + 0.5) end
 	local function money(x) return api.util.formatMoney(round(x or 0)) end
@@ -91,22 +92,23 @@ function data()
 
 	-- Reading the sampler's state --------------------------------------------
 
-	local gsEntity = nil   -- cached once found
-	local function resolveGsEntity()
-		if gsEntity ~= nil then return gsEntity end
-		local ok, e = pcall(api.engine.system.gameScriptSystem.getEntityForGameScript, GS_NAME)
+	-- game-script entities, cached once found: { [gsName] = entity }
+	local gsEntities = {}
+	local function resolveEntity(gsName, substring)
+		if gsEntities[gsName] ~= nil then return gsEntities[gsName] end
+		local ok, e = pcall(api.engine.system.gameScriptSystem.getEntityForGameScript, gsName)
 		if ok and type(e) == "number" and e >= 0 then
-			gsEntity = e
+			gsEntities[gsName] = e
 			return e
 		end
-		-- the resource name may differ from GS_NAME: look for ours by substring
+		-- the resource name may differ: look for ours by substring
 		local okAll, all = pcall(api.res.gameScriptRep.getAll, true)
 		if okAll and type(all) == "table" then
 			for __, name in pairs(all) do
-				if tostring(name):find("running_costs", 1, true) then
+				if tostring(name):find(substring, 1, true) then
 					local ok2, e2 = pcall(api.engine.system.gameScriptSystem.getEntityForGameScript, name)
 					if ok2 and type(e2) == "number" and e2 >= 0 then
-						gsEntity = e2
+						gsEntities[gsName] = e2
 						return e2
 					end
 				end
@@ -114,6 +116,7 @@ function data()
 		end
 		return nil
 	end
+	local function resolveGsEntity() return resolveEntity(GS_NAME, "running_costs.gs") end
 
 	-- Summaries are read per vehicle through the native state
 	-- (state_native:findPath({"summary", v}):asTable()), so a window with a few
@@ -133,6 +136,142 @@ function data()
 		if not e then return nil end
 		local ok, gs = pcall(api.engine.getComponent, e, api.type.ComponentType.GAME_SCRIPT)
 		return (ok and gs) or nil
+	end
+
+	-- Income (0.2.0): one ring per vehicle (or "L<line>") in the sampler's state
+	-- under `inc`, read like the summaries ----------------------------------------
+
+	local incomeCopy = { time = nil, v = nil }
+	local incomeNativeFailed = false
+	local function incomeRingOf(gs, rk)
+		if not gs then return nil end
+		if not incomeNativeFailed then
+			local ok, r = pcall(function()
+				local native = gs.state_native
+				if native == nil then return "nostate" end
+				local nv = native:findPath({ "inc", rk })
+				if nv == nil then return false end
+				return nv:asTable()
+			end)
+			if ok then
+				if type(r) == "table" then return r end
+				return nil   -- no ring for this key yet, or no state yet
+			end
+			incomeNativeFailed = true
+			log.message(LOG_PREFIX .. "income rings read via a copy of the whole state (findPath/asTable unavailable)")
+		end
+		local now = gameTime()
+		if incomeCopy.time == nil or now - incomeCopy.time >= SAMPLE_S * 1000 or now < incomeCopy.time then
+			local okS, st = pcall(function() return gs.state end)
+			incomeCopy.time, incomeCopy.v = now, (okS and type(st) == "table" and type(st.inc) == "table") and st.inc or nil
+		end
+		if not incomeCopy.v then return nil end
+		return incomeCopy.v[rk] or incomeCopy.v[tostring(rk)]
+	end
+
+	-- income booked on an account over [t0, t1]: the game's own "last year"
+	-- figure of the entity (calculateBalance(..., true) = income − running
+	-- costs, see line_react_util.LineBalance) minus the two maintenance types
+	-- a vehicle/line account carries (VEHICLE = running costs,
+	-- VEHICLE_MAINTENANCE = maintenance station). Measured: the income entries
+	-- of such an account answer to the type OTHER, so OTHER (and INFRASTRUCTURE)
+	-- must not be subtracted. Every term only changes when the game books, so
+	-- the result is stable between bookings. nil when unreadable.
+	local INCOME_DEBUG = 0   -- log the first N computations with all four types (0 = off)
+	local function typed(account, t0, t1, name)
+		local t = api.type.JournalEntry.Maintenance[name]
+		if t == nil then return 0 end
+		local ok, v = pcall(api.engine.util.finance.calculateBalance, { account }, t0, t1, true, t)
+		return (ok and type(v) == "number") and v or 0
+	end
+	local function bookedIncome(account, t0, t1)
+		if account == nil or t1 - t0 < 2 * BOOKING_LUMP_MS then return nil end
+		local ok, net = pcall(api.engine.util.finance.calculateBalance, { account }, t0, t1, true)
+		if not ok or type(net) ~= "number" then return nil end
+		local vehicle = typed(account, t0, t1, "VEHICLE")
+		local station = typed(account, t0, t1, "VEHICLE_MAINTENANCE")
+		local income = net - vehicle - station
+		if INCOME_DEBUG > 0 then
+			INCOME_DEBUG = INCOME_DEBUG - 1
+			log.message(LOG_PREFIX .. string.format("debug income: account=%s net=%s VEHICLE=%s VEHICLE_MAINTENANCE=%s INFRASTRUCTURE=%s OTHER=%s -> income=%s",
+				tostring(account), tostring(net), tostring(vehicle), tostring(station),
+				tostring(typed(account, t0, t1, "INFRASTRUCTURE")), tostring(typed(account, t0, t1, "OTHER")), tostring(income)))
+		end
+		return math.max(0, income)
+	end
+
+	-- one TRANSPORT_VEHICLE read per vehicle: the income the game has not booked
+	-- yet (booked at departure; the events arrive per item while unloading)
+	-- and the capacity per cargo type (config.capacities[cargoTypeId + 1])
+	local function vehicleFacts(vehicles)
+		local pending, caps = 0, {}
+		for __, v in ipairs(vehicles or {}) do
+			local okT, tv = pcall(api.engine.getComponent, v, api.type.ComponentType.TRANSPORT_VEHICLE)
+			if okT and tv then
+				local pi = tv.unloadPendingIncome
+				if pi and type(pi.amount) == "number" and pi.amount > 0 then pending = pending + pi.amount end
+				local c = tv.config and tv.config.capacities
+				if type(c) == "table" then
+					for i, cap in ipairs(c) do
+						if type(cap) == "number" and cap > 0 then caps[i - 1] = (caps[i - 1] or 0) + cap end
+					end
+				end
+			end
+		end
+		return pending, caps
+	end
+
+	local cargoInfo = {}   -- key -> { name, icon }
+	local function cargoNameAndIcon(key)
+		local c = cargoInfo[key]
+		if c then return c.name, c.icon end
+		c = { name = tostring(key), icon = nil }
+		local ok, ct = pcall(api.res.cargoTypeRep.get, key)
+		if ok and ct then
+			if type(ct.name) == "string" and ct.name ~= "" then
+				local okN, translated = pcall(_, ct.name)
+				c.name = (okN and type(translated) == "string" and translated ~= "") and translated or ct.name
+			end
+			if type(ct.icon) == "string" and ct.icon ~= "" then c.icon = ct.icon end
+		end
+		cargoInfo[key] = c
+		return c.name, c.icon
+	end
+
+	-- entries of the vehicles' income rings over the cost window; summaries give first
+	local debugRings = 0   -- log the first N ring reads (0 = off)
+	-- line: items the collector could not attribute to a vehicle live under "L<line>"
+	local function incomeEntries(gs, vehicles, summaries, now, windowMs, line)
+		local list = {}
+		if line ~= nil then
+			local firstMin = nil
+			for i in ipairs(vehicles) do
+				local w = summaries[i]
+				if w and w.first and (firstMin == nil or w.first < firstMin) then firstMin = w.first end
+			end
+			list[#list + 1] = cost_history.windowIncome(incomeRingOf(gs, "L" .. line), now, windowMs, firstMin)
+		end
+		for i, v in ipairs(vehicles) do
+			local w = summaries[i]
+			if w then
+				local ring = incomeRingOf(gs, v)
+				local entries = cost_history.windowIncome(ring, now, windowMs, w.first)
+				if debugRings > 0 then
+					debugRings = debugRings - 1
+					local nb, keys = 0, {}
+					if type(ring) == "table" and type(ring.b) == "table" then
+						for __, b in pairs(ring.b) do
+							nb = nb + 1
+							for k in pairs(b.inc or {}) do keys[#keys + 1] = tostring(k) end
+						end
+					end
+					log.message(LOG_PREFIX .. string.format("debug ring v=%s gsI=%s ring=%s buckets=%d keys=%s first=%s now=%d",
+						tostring(v), tostring(gsI ~= nil), type(ring), nb, table.concat(keys, ","), tostring(w.first), now))
+				end
+				list[#list + 1] = entries
+			end
+		end
+		return cost_rows.mergeIncome(list)
 	end
 
 	-- nil = untested, true/false after the first attempt that reached a state
@@ -210,13 +349,14 @@ function data()
 	-- p = { vehicles = {entity}? , line = entity? }
 	local function tableData(p)
 		local vehicles = p.line and lineVehicles(p.line) or (p.vehicles or {})
-		local list, names = {}, {}
+		local list, names, byIndex = {}, {}, {}
 		local gs = gsComponent()
-		for __, v in ipairs(vehicles) do
+		for i, v in ipairs(vehicles) do
 			local w = summaryOf(gs, v)
 			if w then
 				list[#list + 1] = w
 				names[#names + 1] = { v = v, cov = w.cov or 0 }
+				byIndex[i] = w
 			end
 		end
 		local T = cost_rows.build(list, classes)
@@ -241,10 +381,52 @@ function data()
 				if ok and type(b) == "number" then T.booked = -b end
 			end
 		end
+		-- income of the same window (0.2.0)
+		T.income, T.result = nil, nil
+		if not T.empty then
+			local now = gameTime()
+			local win = yearMs()
+			local entries = incomeEntries(gs, vehicles, byIndex, now, win, p.line)
+			local pending, caps = vehicleFacts(vehicles)
+			local account = p.line or vehicles[1]
+			local booked = bookedIncome(account, now - T.coverageMs, now)
+			if booked ~= nil then booked = booked + pending end
+			local factor = cost_rows.scaleFactor(entries, booked)
+			local mode = factor and "own" or "raw"
+			if factor == nil and p.line == nil and vehicles[1] then
+				-- no usable vehicle account: the line's factor (the company-level multiplier is uniform)
+				local okT, tv = pcall(api.engine.getComponent, vehicles[1], api.type.ComponentType.TRANSPORT_VEHICLE)
+				local line = okT and tv and tv.line
+				if type(line) == "number" and line >= 0 then
+					local lv = lineVehicles(line)
+					local ls = {}
+					for i, v in ipairs(lv) do ls[i] = summaryOf(gs, v) end
+					local lineEntries = incomeEntries(gs, lv, ls, now, win, line)
+					local lineBooked = bookedIncome(line, now - T.coverageMs, now)
+					if lineBooked ~= nil then lineBooked = lineBooked + (vehicleFacts(lv)) end
+					local lf = cost_rows.scaleFactor(lineEntries, lineBooked)
+					if lf then factor, mode = lf, "line" end
+				end
+			end
+			-- an account that is readable but has no income in the window still counts as "scaled"
+			local bookedKnown = (booked ~= nil) or mode == "line"
+			local TI = cost_rows.buildIncome(entries, factor, function(k) return (cargoNameAndIcon(k)) end, bookedKnown)
+			TI.mode = mode
+			TI.booked = (mode == "own") and booked or nil
+			TI.pending = (mode == "own") and pending or 0
+			TI.capacity = {}
+			for __, r in ipairs(TI.rows) do TI.capacity[r.key] = caps[r.key] end
+			T.income = TI
+			T.result = cost_rows.result(TI, T)
+		end
 		-- signature for cheap change detection
 		local sig = { tostring(T.empty), tostring(T.coverageMs), tostring(T.lessData), tostring(round(T.sum)), tostring(T.booked and round(T.booked) or "") }
 		for __, r in ipairs(T.rows) do sig[#sig + 1] = r.key .. ":" .. round(r.amount) .. ":" .. round(r.share * 1000) end
 		if T.surcharge then sig[#sig + 1] = "s:" .. round(T.surcharge.amount) end
+		if T.income then
+			sig[#sig + 1] = "i:" .. T.income.mode .. ":" .. round(T.income.sum.income) .. ":" .. #T.income.rows .. ":" .. tostring(T.result and round(T.result) or "") .. ":" .. round(T.income.pending or 0)
+			for __, r in ipairs(T.income.rows) do sig[#sig + 1] = tostring(r.key) .. "=" .. r.n .. ":" .. round(r.income) .. ":" .. tostring(T.income.capacity[r.key]) end
+		end
 		T.sig = table.concat(sig, "|")
 		return T
 	end
@@ -324,6 +506,84 @@ function data()
 		children[#children + 1] = builtin.TableLayout{ rows = rows, columnWeights = { -1, 10, -1 } }
 		if T.booked then
 			children[#children + 1] = cell(fmt("running_costs_booked", { amount = money(T.booked) }), "font-scale-annotation")
+		end
+		-- income table (0.2.0)
+		local TI = T.income
+		if TI then
+			children[#children + 1] = builtin.Component{
+				meta = { tooltip = _("running_costs_header_tooltip") },
+				layout = builtin.BoxLayout{ children = { cell(fmt("running_costs_income_header", { minutes = tostring(cost_rows.minutes(T.coverageMs)) })) } },
+			}
+			if TI.empty then
+				children[#children + 1] = cell(_("running_costs_no_income"))
+				if TI.mode == "own" and TI.booked and TI.booked > 0 then
+					children[#children + 1] = cell(fmt("running_costs_income_booked", { amount = money(TI.booked) }), "font-scale-annotation")
+				end
+			else
+				local irows = { builtin.Row{ cells = {
+					cell(_("running_costs_col_cargo"), "font-scale-annotation"),
+					cell(_("running_costs_col_items"), "font-scale-annotation, kampfmoehre-rc-num"),
+					cell(_("running_costs_col_income"), "font-scale-annotation, kampfmoehre-rc-money"),
+					cell(_("running_costs_col_per_item"), "font-scale-annotation, kampfmoehre-rc-money"),
+					cell(_("running_costs_col_on_time"), "font-scale-annotation, kampfmoehre-rc-num"),
+					cell(_("running_costs_col_capacity"), "font-scale-annotation, kampfmoehre-rc-num"),
+				} } }
+				for __, r in ipairs(TI.rows) do
+					local name, icon = cargoNameAndIcon(r.key)
+					local cargoCell
+					if icon then
+						cargoCell = builtin.Component{
+							meta = { tooltip = name },
+							layout = builtin.BoxLayout{ children = {
+								builtin.ImageView{ meta = { class = "kampfmoehre-rc-cargo" }, path = icon, scaling = builtin.type.ImageViewScaling.AutoFit },
+							} },
+						}
+					else
+						cargoCell = cell(name)
+					end
+					local cap = TI.capacity[r.key]
+					irows[#irows + 1] = builtin.Row{ cells = {
+						cargoCell,
+						cell(tostring(r.n), "font-scale-body, kampfmoehre-rc-num"),
+						cell(money(r.income), "font-scale-body, positive, kampfmoehre-rc-money"),
+						cell(r.perItem and money(r.perItem) or "–", "font-scale-body, kampfmoehre-rc-money"),
+						cell(r.onTimeShare and string.format("%d %%", round(r.onTimeShare * 100)) or "–", "font-scale-body, kampfmoehre-rc-num"),
+						cell(cap and tostring(cap) or "–", "font-scale-body, kampfmoehre-rc-num"),
+					} }
+				end
+				irows[#irows + 1] = builtin.Row{ cells = {
+					cell(_("running_costs_sum"), "font-scale-body, bold"),
+					cell(tostring(TI.sum.n), "font-scale-body, bold, kampfmoehre-rc-num"),
+					cell(money(TI.sum.income), "font-scale-body, bold, positive, kampfmoehre-rc-money"),
+					cell(""), cell(""), cell(""),
+				} }
+				children[#children + 1] = builtin.TableLayout{ rows = irows, columnWeights = { -1, -1, -1, -1, -1, -1 } }
+				if TI.mode == "own" and TI.booked then
+					if (TI.pending or 0) > 0 then
+						children[#children + 1] = cell(fmt("running_costs_income_booked_pending", { amount = money(TI.booked), pending = money(TI.pending) }), "font-scale-annotation")
+					else
+						children[#children + 1] = cell(fmt("running_costs_income_booked", { amount = money(TI.booked) }), "font-scale-annotation")
+					end
+				elseif TI.mode == "line" then
+					children[#children + 1] = cell(_("running_costs_income_line_factor"), "font-scale-annotation")
+				else
+					children[#children + 1] = cell(_("running_costs_income_raw"), "font-scale-annotation")
+				end
+			end
+			-- result line
+			if T.result ~= nil then
+				children[#children + 1] = builtin.Component{
+					meta = { tooltip = _("running_costs_result_tooltip") },
+					layout = builtin.BoxLayout{ children = {
+						cell(fmt("running_costs_result", { amount = money(T.result) }), "font-scale-body, bold, " .. (T.result >= 0 and "positive" or "negative")),
+					} },
+				}
+			else
+				children[#children + 1] = builtin.Component{
+					meta = { tooltip = _("running_costs_income_raw") },
+					layout = builtin.BoxLayout{ children = { cell(fmt("running_costs_result", { amount = "–" }), "font-scale-body, bold") } },
+				}
+			end
 		end
 		return builtin.BoxLayout{ orientation = builtin.type.Orientation.Vertical, children = children }
 	end)

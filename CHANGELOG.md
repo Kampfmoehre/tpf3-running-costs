@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (2026-10-22)
+
+- Income per cargo type under the cost table, for lines and vehicles: items, income, income per item,
+  on-time share and the consist's capacity for the cargo; passengers as one row; a Result line
+  (income minus running costs of the window).
+- Income is scaled to what the game booked on the line's or vehicle's account in the same window;
+  the footnote says which. Without a readable account base prices are shown and the Result is "–".
+- A second game script collects the paid items (a few seconds behind the game); it changes no prices.
+- The saved cost history is rebuilt once on the first load with 0.2.0 (new state format).
+
 ## 0.1.1 (2026-10-21)
 
 - "1 vehicle with less data" in the singular.

@@ -115,6 +115,84 @@ local n6 = 0
 for __ in pairs(h6.b) do n6 = n6 + 1 end
 check("gap: buckets in between are not created", n6 == 2 and h6.b[2].t0 == 5 * M.BUCKET_MS, tostring(n6))
 
+-- shared ring: income without time accumulation
+local r = M.newRing(0)
+check("ring has no first", r.first == nil and r.head == 0)
+M.addIncome(r, 1000, 7, 500, true)
+M.addIncome(r, 2000, 7, 300, false)
+M.addIncome(r, 3000, 9, 100, nil)                     -- passengers: no quality
+local I = M.windowIncome(r, 3000, Y, nil)
+near("items", I[7].n, 2, 1e-9); near("base", I[7].base, 800, 1e-9)
+check("on time 1 of 2 with quality", I[7].ok == 1 and I[7].q == 2)
+check("no quality counted", I[9].n == 1 and I[9].q == 0 and I[9].ok == 0)
+-- the window cut uses the cost history's first, pro rata like the costs
+local r2 = M.newRing(0)
+M.addIncome(r2, M.BUCKET_MS / 2 + 1000, 7, 1000, true)                  -- bucket 0, data from first = B/2
+local I2 = M.windowIncome(r2, M.BUCKET_MS + 10, M.BUCKET_MS / 4 + 10, M.BUCKET_MS / 2)
+near("income pro rata against first", I2[7].base, 500, 1e-6)
+near("items pro rata too", I2[7].n, 0.5, 1e-9)
+check("empty ring", next(M.windowIncome(M.newRing(0), 0, Y, nil)) == nil and next(M.windowIncome(nil, 0, Y, nil)) == nil)
+-- bucketWeight is the single rule both windows use
+near("weight: full bucket", M.bucketWeight(0, 2 * M.BUCKET_MS, 3 * M.BUCKET_MS, nil), 1, 1e-9)
+near("weight: outside", M.bucketWeight(0, 10 * M.BUCKET_MS, M.BUCKET_MS, nil), 0, 1e-9)
+near("weight: half cut, first mid-bucket", M.bucketWeight(0, M.BUCKET_MS + 10, M.BUCKET_MS / 4 + 10, M.BUCKET_MS / 2), 0.5, 1e-9)
+-- exported bucketFor keeps the ring bounded and resets on backwards time
+local r3 = M.newRing(0)
+for i = 0, 9 do M.bucketFor(r3, i * M.BUCKET_MS) end
+local n3 = 0; for __ in pairs(r3.b) do n3 = n3 + 1 end
+check("ring bounded", n3 == M.BUCKETS)
+M.bucketFor(r3, 5); check("reset on backwards time without first", r3.head == 1 and r3.first == nil)
+
+-- buffered income: counts arrive late (up to a flush interval after the
+-- events) and must land in the bucket of their event time, never reset the ring
+local r4 = M.newRing(0)
+M.addIncomeCounts(r4, 1000, 7, 3, 300, 2, 3)                 -- 3 items at t=1 s
+local I4 = M.windowIncome(r4, 2000, Y, nil)
+check("counts added", I4[7].n == 3 and I4[7].base == 300 and I4[7].ok == 2 and I4[7].q == 3)
+M.addIncomeCounts(r4, M.BUCKET_MS + 500, 7, 1, 100, 1, 1)    -- bucket 1 opens
+M.addIncomeCounts(r4, M.BUCKET_MS - 500, 7, 1, 50, 0, 1)     -- late item of bucket 0
+check("late item lands in its own bucket", r4.b[1].inc[7].n == 4 and r4.b[2].inc[7].n == 1 and r4.head == 2)
+M.addIncomeCounts(r4, -5000, 7, 1, 10, 0, 0)                 -- older than the ring start: head bucket, no reset
+check("too-old item goes to the newest bucket, ring kept", r4.head == 2 and r4.b[2].inc[7].n == 2 and r4.b[1].inc[7].n == 4)
+
+-- income before the cost history's first sample must not count (review 0.2.0 #1)
+near("weight: bucket entirely before first is 0", M.bucketWeight(0, 3 * M.BUCKET_MS, 6 * M.BUCKET_MS, 2 * M.BUCKET_MS), 0, 1e-9)
+local r5 = M.newRing(0)
+M.addIncomeCounts(r5, 100, 7, 1, 10, 0, 0)
+M.addIncomeCounts(r5, 2 * M.BUCKET_MS + 100, 7, 1, 10, 0, 0)
+near("items before first are dropped", M.windowIncome(r5, 2 * M.BUCKET_MS + 200, Y, 2 * M.BUCKET_MS)[7].n, 1, 1e-9)
+
+-- income queue: the collector appends compact records per batch to a tiny
+-- state, the sampler consumes new ones (by id) into the rings
+local buf = M.newBuffer()
+check("empty buffer", buf.items == 0 and buf.since == nil)
+M.bufferAdd(buf, 25245, 7, 6 * M.BUCKET_MS + 10, 100, true)
+M.bufferAdd(buf, 25245, 7, 6 * M.BUCKET_MS + 20, 50, nil)
+M.bufferAdd(buf, "L9", 3, 6 * M.BUCKET_MS + 20, 7, false)
+check("buffer counts, since = oldest item", buf.items == 3 and buf.since == 6 * M.BUCKET_MS + 10)
+local q = {}
+local added = M.queueAppend(q, buf, "t1", 6 * M.BUCKET_MS + 30)
+check("one record per ring and cargo, ids from the tag", added == 2 and q["t1-1"] ~= nil and q["t1-2"] ~= nil)
+local recs = { q["t1-1"], q["t1-2"] }
+table.sort(recs, function(a, b) return tostring(a.rk) < tostring(b.rk) end)
+check("record fields", recs[1].rk == 25245 and recs[1].key == 7 and recs[1].n == 2 and recs[1].base == 150 and recs[1].ok == 1 and recs[1].q == 1 and recs[1].t == 6 * M.BUCKET_MS + 10)
+check("line-level record", recs[2].rk == "L9" and recs[2].n == 1 and recs[2].q == 1 and recs[2].ok == 0)
+M.queueTrim(q, 6 * M.BUCKET_MS + 30 + 10000, 10000)
+check("trim keeps records younger than the age", q["t1-1"] ~= nil)
+M.queueTrim(q, 6 * M.BUCKET_MS + 30 + 10001, 10000)
+check("trim drops old records", next(q) == nil)
+-- consuming: every record once, even when read twice
+local q2 = {}
+M.queueAppend(q2, buf, "t2", 0)             -- buf was emptied by the first append
+check("append of an empty buffer adds nothing", next(q2) == nil)
+M.bufferAdd(buf, 25245, 7, 6 * M.BUCKET_MS + 40, 10, true)
+M.queueAppend(q2, buf, "t2", 6 * M.BUCKET_MS + 40)
+local rings, seen = {}, {}
+check("consume adds once", M.queueConsume(q2, rings, seen, 6 * M.BUCKET_MS + 40) == 1 and M.queueConsume(q2, rings, seen, 6 * M.BUCKET_MS + 40) == 0)
+check("consumed into the ring", M.windowIncome(rings[25245], 6 * M.BUCKET_MS + 50, Y, nil)[7].n == 1)
+M.queueConsume(q2, rings, seen, 6 * M.BUCKET_MS + 40 + 120000)
+check("seen set pruned after a while", next(seen) == nil)
+
 if failures > 0 then
 	print(failures .. " failure(s)")
 	os.exit(1)

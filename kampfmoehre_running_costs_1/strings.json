@@ -22,7 +22,21 @@
         "running_costs_short_waiting": "waiting",
         "running_costs_short_terminal": "terminal {factor} %",
         "running_costs_short_depot": "depot {factor} %",
-        "running_costs_less_data_one": "1 vehicle with less data"
+        "running_costs_less_data_one": "1 vehicle with less data",
+        "running_costs_income_header": "Income of the last {minutes} min of game time",
+        "running_costs_col_cargo": "Cargo",
+        "running_costs_col_items": "Items",
+        "running_costs_col_income": "Income",
+        "running_costs_col_per_item": "per item",
+        "running_costs_col_on_time": "on time",
+        "running_costs_col_capacity": "Capacity",
+        "running_costs_income_booked": "booked by the game: {amount}",
+        "running_costs_income_line_factor": "scaled with the line's bookings",
+        "running_costs_income_raw": "base prices, before the company-level factor",
+        "running_costs_result": "Result: {amount}",
+        "running_costs_result_tooltip": "Income minus running costs of the window shown above.",
+        "running_costs_no_income": "no income yet",
+        "running_costs_income_booked_pending": "booked by the game: {amount} (incl. {pending} not yet booked)"
     },
     "de": {
         "running_costs_now": "Jetzt {rate}/min",
@@ -47,6 +61,20 @@
         "running_costs_short_waiting": "Warten",
         "running_costs_short_terminal": "Terminal {factor} %",
         "running_costs_short_depot": "Depot {factor} %",
-        "running_costs_less_data_one": "1 Fahrzeug mit weniger Daten"
+        "running_costs_less_data_one": "1 Fahrzeug mit weniger Daten",
+        "running_costs_income_header": "Einnahmen der letzten {minutes} min Spielzeit",
+        "running_costs_col_cargo": "Fracht",
+        "running_costs_col_items": "Stück",
+        "running_costs_col_income": "Einnahmen",
+        "running_costs_col_per_item": "je Stück",
+        "running_costs_col_on_time": "pünktlich",
+        "running_costs_col_capacity": "Kapazität",
+        "running_costs_income_booked": "vom Spiel gebucht: {amount}",
+        "running_costs_income_line_factor": "skaliert mit den Buchungen der Linie",
+        "running_costs_income_raw": "Grundpreise, vor dem Firmenlevel-Faktor",
+        "running_costs_result": "Ergebnis: {amount}",
+        "running_costs_result_tooltip": "Einnahmen minus Betriebskosten des oben gezeigten Zeitraums.",
+        "running_costs_no_income": "noch keine Einnahmen",
+        "running_costs_income_booked_pending": "vom Spiel gebucht: {amount} (inkl. {pending} noch nicht gebucht)"
     }
 }

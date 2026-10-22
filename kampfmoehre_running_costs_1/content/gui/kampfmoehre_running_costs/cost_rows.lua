@@ -86,6 +86,84 @@ function M.live(rcPerYear, staticPerYear, key, classes)
 	}
 end
 
+-- Income (0.2.0) ----------------------------------------------------------------
+
+-- per-vehicle income windows ({ [key] = { n, base, ok, q } }) -> one table
+function M.mergeIncome(list)
+	local out = {}
+	for __, entries in ipairs(list or {}) do
+		for k, e in pairs(entries or {}) do
+			local o = out[k]
+			if o == nil then
+				o = { n = 0, base = 0, ok = 0, q = 0 }
+				out[k] = o
+			end
+			o.n = o.n + (e.n or 0)
+			o.base = o.base + (e.base or 0)
+			o.ok = o.ok + (e.ok or 0)
+			o.q = o.q + (e.q or 0)
+		end
+	end
+	return out
+end
+
+local function sumBase(entries)
+	local t = 0
+	for __, e in pairs(entries or {}) do t = t + (e.base or 0) end
+	return t
+end
+
+-- booked income of the account over the window / sum of the base values ->
+-- the factor that turns base values into booked money, nil when either is
+-- missing or not positive
+function M.scaleFactor(entries, booked)
+	if type(booked) ~= "number" or booked <= 0 then return nil end
+	local base = sumBase(entries)
+	if base <= 0 then return nil end
+	return booked / base
+end
+
+-- entries -> { rows = { { key, name, n, base, income, perItem | nil, onTimeShare | nil } },
+--   sum = { n, base, income }, scaled, empty }; nameOf(key) -> display name or nil;
+-- bookedKnown: an account was readable (an empty table is then still "scaled")
+function M.buildIncome(entries, factor, nameOf, bookedKnown)
+	local out = { rows = {}, sum = { n = 0, base = 0, income = 0 }, scaled = factor ~= nil, empty = true }
+	if bookedKnown == true and sumBase(entries) == 0 then out.scaled = true end
+	for k, e in pairs(entries or {}) do
+		local n = round(e.n or 0)
+		if n > 0 then
+			local income = (e.base or 0) * (factor or 1)
+			local r = {
+				key = k,
+				name = (nameOf and nameOf(k)) or tostring(k),
+				n = n,
+				base = e.base or 0,
+				income = income,
+				perItem = (n >= 1 and income > 0) and income / n or nil,
+				onTimeShare = ((e.q or 0) > 0) and (e.ok or 0) / e.q or nil,
+			}
+			out.rows[#out.rows + 1] = r
+			out.sum.n = out.sum.n + n
+			out.sum.base = out.sum.base + r.base
+			out.sum.income = out.sum.income + income
+		end
+	end
+	table.sort(out.rows, function(a, b)
+		if a.income ~= b.income then return a.income > b.income end
+		return tostring(a.key) < tostring(b.key)
+	end)
+	out.empty = #out.rows == 0
+	return out
+end
+
+-- income minus running costs of the window, nil when the income is not scaled
+-- (base prices are no result) or nothing at all is known
+function M.result(incomeTable, costTable)
+	if not incomeTable or not incomeTable.scaled then return nil end
+	if incomeTable.empty and (not costTable or costTable.empty) then return nil end
+	return (incomeTable.sum and incomeTable.sum.income or 0) - ((costTable and costTable.sum) or 0)
+end
+
 -- strings.json key for the "n vehicles with less data" note: the game has no
 -- plural helper, so singular and plural are two keys
 function M.lessDataKey(n)

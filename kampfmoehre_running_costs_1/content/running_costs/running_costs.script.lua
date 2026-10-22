@@ -14,7 +14,9 @@
 -- game-script state (saved with the game). State layout:
 --   { version, tSample, tPerfLog, fails,
 --     v = { [vehicle] = History },
---     summary = { [vehicle] = Summary + { line, rc, static, key } },
+--     summary = { [vehicle] = Summary + { line, rc, static, key, first } },
+--     inc = { [vehicle or "L<line>"] = Ring with bucket.inc } (income records consumed
+--           from income.script.lua's queue state), incSeen = { [recordId] = t },
 --     stat = { [vehicle] = { r = static rate per year, t = last check } },
 --     perf = { lastMs, maxMs } }
 -- Vehicles come from transportVehicleSystem.getVehiclesWithState (four lists)
@@ -24,8 +26,8 @@
 -- A version mismatch rebuilds the state from scratch.
 
 function data()
-	local VERSION = "0.1.1"
-	local STATE_VERSION = 2       -- 2: histories carry `first` (coverage from the first sample)
+	local VERSION = "0.2.0"
+	local STATE_VERSION = 3       -- 2: histories carry `first`; 3: income rings `inc` (0.2.0)
 	local MAX_FAILS = 10          -- consecutive failed steps before the state is rebuilt
 	local SAMPLE_MS = 3000       -- game time between samples (8.5 ms per sample at 364 vehicles: state get 2.8, classify 2.8, set 2.9)
 	local PERF_LOG_MS = 300000   -- game time between perf log lines
@@ -44,6 +46,21 @@ function data()
 	end
 
 	local errorCount = 0
+	local incomeSeen = false   -- log once per thread when the income queue delivered
+	local INCOME_GS_NAME = "kampfmoehre_running_costs_1::/running_costs/income.gs"
+	local incomeEntity = nil
+	-- the queue of the income collector's state (a copy; tiny), or nil
+	local function incomeQueue()
+		if incomeEntity == nil then
+			local ok, e = pcall(api.engine.system.gameScriptSystem.getEntityForGameScript, INCOME_GS_NAME)
+			if ok and type(e) == "number" and e >= 0 then incomeEntity = e else return nil end
+		end
+		local ok, gs = pcall(api.engine.getComponent, incomeEntity, api.type.ComponentType.GAME_SCRIPT)
+		if not ok or not gs then return nil end
+		local okS, st = pcall(function() return gs.state end)
+		if okS and type(st) == "table" and type(st.q) == "table" then return st.q end
+		return nil
+	end
 	local STATE_NAMES = { "IN_DEPOT", "EN_ROUTE", "AT_TERMINAL", "GOING_TO_DEPOT" }
 
 	-- static running cost per year of a consist: sum of the parts' metadata
@@ -134,6 +151,7 @@ function data()
 			history.add(h, now, dtMs, key, static, math.max(0, rc - static), classes.factor(key), yearMs)
 			local w = history.window(h, now, yearMs, classes.factor, yearMs)
 			w.line = lineOf[v] or -1
+			w.first = h.first   -- the income table (0.2.0) shares this window
 			w.rc = rc
 			w.static = static
 			w.key = key
@@ -144,6 +162,18 @@ function data()
 				s.v[v] = nil
 				s.summary[v] = nil
 				if s.stat then s.stat[v] = nil end
+				if s.inc then s.inc[v] = nil end
+			end
+		end
+		-- line-level income rings of lines that no longer exist (every ~60 s)
+		if s.inc and (s.incSweep or 0) + 60000 <= now then
+			s.incSweep = now
+			for k in pairs(s.inc) do
+				if type(k) == "string" then
+					local line = tonumber(k:match("^L(%d+)$"))
+					local okE, exists = line and pcall(api.engine.entityExists, line)
+					if not line or (okE and not exists) then s.inc[k] = nil end
+				end
 			end
 		end
 		return count
@@ -159,7 +189,7 @@ function data()
 		if type(s) ~= "table" or s.version ~= STATE_VERSION or type(s.tSample) ~= "number" or s.tSample > now
 			or type(s.v) ~= "table" or type(s.summary) ~= "table" then
 			s = { version = STATE_VERSION, tSample = now, tPerfLog = now, fails = 0,
-				v = {}, summary = {}, perf = { lastMs = 0, maxMs = 0 } }
+				v = {}, summary = {}, inc = {}, perf = { lastMs = 0, maxMs = 0 } }
 			state:set(s)
 			log("v" .. VERSION .. " sampler started (fresh state) at gameTime=" .. now)
 			return
@@ -170,6 +200,20 @@ function data()
 		s.tSample = now
 		local count = sample(s, now, dtMs)
 		if count == nil then return end   -- vehicle lists unavailable this tick: nothing written
+		-- income records queued by income.script.lua (its own, tiny state)
+		s.inc = s.inc or {}
+		s.incSeen = s.incSeen or {}
+		local queue = incomeQueue()
+		if queue then
+			local moved = history.queueConsume(queue, s.inc, s.incSeen, now)
+			if moved > 0 then
+				s.incItems = (s.incItems or 0) + moved
+				if not incomeSeen then
+					incomeSeen = true
+					log("income queue read from income.script.lua: " .. moved .. " records consumed")
+				end
+			end
+		end
 		s.fails = 0
 		local tSample = clock:getTime() / 1000
 		state:set(s)
@@ -180,8 +224,9 @@ function data()
 		if now - (s.tPerfLog or 0) >= PERF_LOG_MS then
 			s.tPerfLog = now
 			state:set(s)
-			log(string.format("perf: last sample %.2f ms (state get %.2f, classify %.2f, state set %.2f), max of logged samples %.2f ms, %d vehicles",
-				ms, tGet, tSample - tGet, ms - tSample, s.perf.maxMs, count))
+			log(string.format("perf: last sample %.2f ms (state get %.2f, classify %.2f, state set %.2f), max of logged samples %.2f ms, %d vehicles, %d income records consumed since the last line",
+				ms, tGet, tSample - tGet, ms - tSample, s.perf.maxMs, count, s.incItems or 0))
+			s.incItems = 0
 		end
 	end
 

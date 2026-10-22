@@ -38,6 +38,18 @@ function data()
 	a("R::KampfmoehreRunningCostsTable TextView!kampfmoehre-rc-money", {
 		gravity = { 1, 0.5 },
 	})
+	-- counts and percentages right-aligned too (income table)
+	a("R::KampfmoehreRunningCostsTable TextView!kampfmoehre-rc-num", {
+		gravity = { 1, 0.5 },
+	})
+	-- cargo icon of the income table, sized like a text line
+	a("R::KampfmoehreRunningCostsTable ImageView!kampfmoehre-rc-cargo", {
+		gravity = { 0, 0.5 },
+		margin = { 2, 4, 2, 4 },
+	})
+	a("!font-small R::KampfmoehreRunningCostsTable ImageView!kampfmoehre-rc-cargo", { size = { 20, 20 } })
+	a("!font-medium R::KampfmoehreRunningCostsTable ImageView!kampfmoehre-rc-cargo", { size = { 24, 24 } })
+	a("!font-large R::KampfmoehreRunningCostsTable ImageView!kampfmoehre-rc-cargo", { size = { 28, 28 } })
 	a("R::KampfmoehreRunningCostsTable Component!kampfmoehre-rc-barcell", {
 		gravity = { -1, -1 },
 	})
